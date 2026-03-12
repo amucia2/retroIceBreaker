@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Retro Icebreaker</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- SCREEN: Entry -->
+    <div id="screen-entry" class="screen active">
+      <div class="entry-wrap">
+        <div class="logo">
+          <span class="logo-icon">◈</span>
+          <h1>Icebreaker</h1>
+          <p class="tagline">Sprint retrospective opener</p>
+        </div>
+        <div class="card">
+          <div class="tab-row">
+            <button class="tab active" data-tab="create">Create session</button>
+            <button class="tab" data-tab="join">Join session</button>
+          </div>
+
+          <!-- Create -->
+          <div id="tab-create" class="tab-content active">
+            <label>Your name</label>
+            <input id="create-name" type="text" placeholder="e.g. Tony" maxlength="30" />
+
+            <label>Question <span class="hint">(or roll one)</span></label>
+            <div class="question-row">
+              <input id="create-question" type="text" placeholder="Loading..." maxlength="200" />
+              <button id="roll-question" class="btn-icon" title="Roll random question">⟳</button>
+            </div>
+
+            <div class="toggle-row">
+              <label class="toggle-label">I'm playing (not just hosting)</label>
+              <label class="switch">
+                <input id="create-host-is-player" type="checkbox" checked />
+                <span class="slider"></span>
+              </label>
+            </div>
+
+            <button id="btn-create" class="btn-primary">Create session</button>
+          </div>
+
+          <!-- Join -->
+          <div id="tab-join" class="tab-content">
+            <label>Session code</label>
+            <input id="join-code" type="text" placeholder="e.g. A3F9B2" maxlength="8" style="text-transform:uppercase;letter-spacing:0.15em" />
+            <label>Your name</label>
+            <input id="join-name" type="text" placeholder="e.g. Alex" maxlength="30" />
+            <button id="btn-join" class="btn-primary">Join session</button>
+          </div>
+        </div>
+        <p class="error-msg" id="entry-error"></p>
+      </div>
+    </div>
+
+    <!-- SCREEN: Game -->
+    <div id="screen-game" class="screen">
+      <header class="game-header">
+        <div class="session-info">
+          <span class="session-code-label">Session</span>
+          <span id="header-session-id" class="session-code"></span>
+        </div>
+        <div class="question-display" id="header-question"></div>
+        <div class="header-right">
+          <span id="header-player-name" class="player-name-tag"></span>
+        </div>
+      </header>
+
+      <main id="game-main">
+        <!-- Dynamic content injected here -->
+      </main>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
