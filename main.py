@@ -18,10 +18,21 @@ from game import (
 )
 from questions import QUESTION_BANK
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./icebreaker.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "*")
 
-engine = create_async_engine(DATABASE_URL, echo=False)
+# In-memory SQLite needs a single shared connection so all requests see the same data.
+# StaticPool reuses one connection; NullPool is used for file-based DBs.
+if ":memory:" in DATABASE_URL:
+    from sqlalchemy.pool import StaticPool
+    engine = create_async_engine(
+        DATABASE_URL,
+        echo=False,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+else:
+    engine = create_async_engine(DATABASE_URL, echo=False)
 async_session = async_sessionmaker(engine, expire_on_commit=False)
 
 
