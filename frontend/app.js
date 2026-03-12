@@ -172,6 +172,9 @@ function renderGameState(gs) {
 
   const main = $('game-main');
 
+  // Clear phase marker when leaving answering state
+  if (gs.state !== 'answering') main.dataset.phase = '';
+
   switch (gs.state) {
     case 'lobby':     renderLobby(main, gs);     break;
     case 'answering': renderAnswering(main, gs);  break;
@@ -263,56 +266,89 @@ function renderAnswering(main, gs) {
   const submittedCount = allPlayers.filter(p => p.submitted).length;
   const allSubmitted = submittedCount === totalAnswering;
 
-  let html = `
-    <h2 class="phase-title">Submit your answer</h2>
-    <p class="phase-subtitle">${submittedCount} of ${totalAnswering} submitted</p>
-  `;
+  // Check if we're already rendering this phase — if so, do a partial update
+  // to avoid nuking any in-progress textarea content
+  const alreadyRendered = main.dataset.phase === 'answering';
 
-  if (!gs.i_submitted) {
-    html += `
-      <div class="answer-box">
-        <label style="text-transform:none;font-size:1rem;font-weight:700;color:var(--text);letter-spacing:0">"${escHtml(gs.question)}"</label>
-        <textarea id="answer-input" placeholder="Write your answer here…" maxlength="400"></textarea>
-        <button class="btn-action" id="btn-submit-answer">Submit answer</button>
-      </div>
+  if (!alreadyRendered) {
+    // Full render on first entry to this phase
+    main.dataset.phase = 'answering';
+    let html = `
+      <h2 class="phase-title">Submit your answer</h2>
+      <p class="phase-subtitle" id="answer-subtitle">${submittedCount} of ${totalAnswering} submitted</p>
     `;
-  } else {
-    html += `
-      <div style="margin-bottom:1.5rem">
-        <span class="submitted-badge">✓ Answer submitted</span>
-        <p style="margin-top:0.75rem;color:var(--text-dim);font-size:0.88rem;">Waiting for everyone else…</p>
-      </div>
-    `;
+
+    if (!gs.i_submitted) {
+      html += `
+        <div class="answer-box">
+          <label style="text-transform:none;font-size:1rem;font-weight:700;color:var(--text);letter-spacing:0">"${escHtml(gs.question)}"</label>
+          <textarea id="answer-input" placeholder="Write your answer here…" maxlength="400"></textarea>
+          <button class="btn-action" id="btn-submit-answer">Submit answer</button>
+        </div>
+      `;
+    } else {
+      html += `
+        <div id="answer-submitted-msg" style="margin-bottom:1.5rem">
+          <span class="submitted-badge">✓ Answer submitted</span>
+          <p style="margin-top:0.75rem;color:var(--text-dim);font-size:0.88rem;">Waiting for everyone else…</p>
+        </div>
+      `;
+    }
+
+    html += `<div class="waiting-bar"><h3>Submissions</h3><div class="progress-list" id="answer-progress"></div></div>`;
+
+    if (isHost) {
+      html += `<hr class="divider" /><div class="action-row" id="host-answer-actions"></div>`;
+    }
+
+    main.innerHTML = html;
+
+    $('btn-submit-answer')?.addEventListener('click', () => {
+      const text = $('answer-input').value.trim();
+      if (!text) return;
+      send({ action: 'submit_answer', text });
+      $('btn-submit-answer').disabled = true;
+    });
   }
 
-  html += `<div class="waiting-bar"><h3>Submissions</h3><div class="progress-list">`;
-  for (const p of allPlayers) {
-    const youTag = p.id === state.playerId ? ' <span class="badge badge-you">You</span>' : '';
-    html += `<div class="progress-item"><div class="check ${p.submitted ? 'done' : ''}">✓</div><span>${escHtml(p.name)}${youTag}</span></div>`;
-  }
-  html += `</div></div>`;
+  // Always update the dynamic parts without touching the textarea
+  const subtitle = $('answer-subtitle');
+  if (subtitle) subtitle.textContent = `${submittedCount} of ${totalAnswering} submitted`;
 
-  if (isHost) {
-    html += `
-      <hr class="divider" />
-      <div class="action-row">
-        <button class="btn-action" id="btn-reveal-answers" ${allSubmitted ? '' : 'disabled'}>Reveal all answers</button>
-        ${!allSubmitted ? `<button class="btn-secondary" id="btn-force-reveal">Force reveal (${submittedCount}/${totalAnswering})</button>` : ''}
-      </div>
+  // If the player just submitted, swap out the textarea for the confirmation message
+  if (gs.i_submitted && $('answer-input')) {
+    const answerBox = $('answer-input').closest('.answer-box');
+    if (answerBox) {
+      const msg = document.createElement('div');
+      msg.id = 'answer-submitted-msg';
+      msg.style.marginBottom = '1.5rem';
+      msg.innerHTML = `<span class="submitted-badge">✓ Answer submitted</span>
+        <p style="margin-top:0.75rem;color:var(--text-dim);font-size:0.88rem;">Waiting for everyone else…</p>`;
+      answerBox.replaceWith(msg);
+    }
+  }
+
+  // Update progress list
+  const progressEl = $('answer-progress');
+  if (progressEl) {
+    let progressHtml = '';
+    for (const p of allPlayers) {
+      const youTag = p.id === state.playerId ? ' <span class="badge badge-you">You</span>' : '';
+      progressHtml += `<div class="progress-item"><div class="check ${p.submitted ? 'done' : ''}">✓</div><span>${escHtml(p.name)}${youTag}</span></div>`;
+    }
+    progressEl.innerHTML = progressHtml;
+  }
+
+  // Update host controls
+  const hostActions = $('host-answer-actions');
+  if (isHost && hostActions) {
+    hostActions.innerHTML = `
+      <button class="btn-action" id="btn-reveal-answers" ${allSubmitted ? '' : 'disabled'}>Reveal all answers</button>
+      ${!allSubmitted ? `<button class="btn-secondary" id="btn-force-reveal">Force reveal (${submittedCount}/${totalAnswering})</button>` : ''}
     `;
+    $('btn-reveal-answers')?.addEventListener('click', () => send({ action: 'reveal_answers' }));
+    $('btn-force-reveal')?.addEventListener('click', () => send({ action: 'reveal_answers' }));
   }
-
-  main.innerHTML = html;
-
-  $('btn-submit-answer')?.addEventListener('click', () => {
-    const text = $('answer-input').value.trim();
-    if (!text) return;
-    send({ action: 'submit_answer', text });
-    $('btn-submit-answer').disabled = true;
-  });
-
-  $('btn-reveal-answers')?.addEventListener('click', () => send({ action: 'reveal_answers' }));
-  $('btn-force-reveal')?.addEventListener('click', () => send({ action: 'reveal_answers' }));
 }
 
 // ---- REVEAL ----
@@ -377,24 +413,23 @@ function renderGuessing(main, gs) {
     html += `<div class="guess-prompt">Pick the author</div>
              <div class="player-guess-grid">`;
 
+    // Show ALL players — including the actual author — so their absence can't be used to deduce who wrote it
     for (const p of gs.players) {
-      if (!eligibleGuessers.includes(p.id) && p.id !== state.playerId) continue;
-      // Don't show author's name (they're locked out, but we also hide their button for author)
-      // Actually show all players except self if you ARE an eligible guesser
-      // (Author is not eligible so won't see this section anyway)
       html += `<button class="guess-btn" data-pid="${p.id}">${escHtml(p.name)}</button>`;
     }
 
     html += `</div>`;
   }
 
-  // Waiting list
-  html += `<div class="guesser-waiting">`;
+  // Show all players statically — no completion ticks, which would reveal the author by absence
+  const pendingCount = eligibleGuessers.length - guessedSoFar.length;
+  html += `<div class="guesser-waiting">
+    <div style="font-size:0.75rem;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-muted);margin-bottom:0.5rem;">
+      ${pendingCount > 0 ? pendingCount + ` guess${pendingCount !== 1 ? 'es' : ''} remaining` : 'All guesses in'}
+    </div>`;
   for (const p of gs.players) {
-    if (!eligibleGuessers.includes(p.id)) continue;
-    const done = guessedSoFar.includes(p.id);
-    const youTag = p.id === state.playerId ? ' (you)' : '';
-    html += `<div class="guesser-row"><div class="check ${done ? 'done' : ''}">✓</div>${escHtml(p.name)}${youTag}</div>`;
+    const youTag = p.id === state.playerId ? ' <span class="badge badge-you">You</span>' : '';
+    html += `<div class="guesser-row"><div style="width:7px;height:7px;border-radius:50%;background:var(--text-muted);flex-shrink:0"></div>${escHtml(p.name)}${youTag}</div>`;
   }
   html += `</div></div>`;
 
@@ -427,21 +462,20 @@ function renderGuessed(main, gs) {
 
   let html = `
     <h2 class="phase-title">Guesses are in!</h2>
-    <p class="phase-subtitle">Here's what people think… who wrote it?</p>
+    <p class="phase-subtitle">Here's the vote tally — host will reveal who wrote it.</p>
 
     <div style="margin-bottom:1rem;font-size:0.88rem;color:var(--text-dim)">Answer: <strong style="color:var(--text)">"${escHtml(gs.current_answer.text)}"</strong></div>
 
     <div class="distribution-grid">
   `;
 
-  const totalGuesses = dist.reduce((s, d) => s + d.guessers.length, 0);
-
-  for (const d of dist.sort((a, b) => b.guessers.length - a.guessers.length)) {
+  // Sort by count descending; show counts only — no guesser names before reveal
+  for (const d of [...dist].sort((a, b) => b.count - a.count)) {
     html += `
       <div class="dist-card">
         <div class="dist-name">${escHtml(d.name)}</div>
-        <div class="dist-guessers">${d.guessers.map(escHtml).join(', ') || '—'}</div>
-        <div class="dist-count">${d.guessers.length}</div>
+        <div class="dist-guessers" style="color:var(--text-muted);font-style:italic">votes</div>
+        <div class="dist-count">${d.count}</div>
       </div>
     `;
   }
@@ -468,6 +502,18 @@ function renderRevealed(main, gs) {
   const author = gs.true_author;
   const dist = gs.guess_distribution || [];
   const isLastAnswer = gs.answer_index >= gs.total_answers - 1;
+  const guesserResults = gs.guesser_results || {};
+  const myResult = guesserResults[state.playerId]; // true=correct, false=wrong, undefined=author/non-player
+
+  // Personal result banner for the viewer
+  let myResultBanner = '';
+  if (myResult === true) {
+    myResultBanner = `<div class="result-banner result-correct">✓ You guessed correctly!</div>`;
+  } else if (myResult === false) {
+    myResultBanner = `<div class="result-banner result-wrong">✗ Better luck next time!</div>`;
+  } else if (author && author.id === state.playerId) {
+    myResultBanner = `<div class="result-banner result-author">✦ This was your answer</div>`;
+  }
 
   let html = `
     <h2 class="phase-title">Author revealed!</h2>
@@ -483,16 +529,26 @@ function renderRevealed(main, gs) {
       </div>
     </div>
 
+    ${myResultBanner}
+
     <div class="distribution-grid">
   `;
 
-  for (const d of dist.sort((a, b) => b.guessers.length - a.guessers.length)) {
+  for (const d of [...dist].sort((a, b) => b.count - a.count)) {
     const isAuthor = author && d.name === author.name;
+    // Build guesser chips with green/red colouring
+    let guesserChips = '—';
+    if (d.guessers && d.guessers.length) {
+      guesserChips = d.guessers.map(g => {
+        const cls = g.correct ? 'guesser-chip correct' : 'guesser-chip wrong';
+        return `<span class="${cls}">${escHtml(g.name)}</span>`;
+      }).join('');
+    }
     html += `
       <div class="dist-card ${isAuthor ? 'is-author' : ''}">
         <div class="dist-name">${escHtml(d.name)}${isAuthor ? ' ✦' : ''}</div>
-        <div class="dist-guessers">${d.guessers.map(escHtml).join(', ') || '—'}</div>
-        <div class="dist-count">${d.guessers.length}</div>
+        <div class="dist-guessers">${guesserChips}</div>
+        <div class="dist-count">${d.count}</div>
       </div>
     `;
   }

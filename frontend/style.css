@@ -11,7 +11,7 @@
   --text-muted: #4a5068;
   --success: #52d68a;
   --radius: 10px;
-  --font: 'Syne', sans-serif;
+  --font: 'DM Sans', sans-serif;
   --mono: 'JetBrains Mono', monospace;
 }
 
@@ -346,12 +346,13 @@ input[type="text"]::placeholder { color: var(--text-muted); }
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 0.65rem 0.9rem;
-  font-size: 0.88rem;
+  padding: 0.55rem 0.75rem;
+  font-size: 0.85rem;
   font-weight: 600;
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  flex-wrap: wrap;
+  gap: 0.35rem;
   transition: all 0.3s;
   animation: chip-in 0.3s ease;
 }
@@ -729,12 +730,14 @@ input[type="text"]::placeholder { color: var(--text-muted); }
 
 .badge {
   display: inline-block;
-  padding: 0.2rem 0.55rem;
+  padding: 0.15rem 0.45rem;
   border-radius: 20px;
-  font-size: 0.72rem;
+  font-size: 0.65rem;
   font-weight: 700;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .badge-host { background: rgba(232,197,71,0.15); color: var(--accent); }
 .badge-you { background: rgba(79,196,207,0.12); color: var(--accent2); }
@@ -763,4 +766,49 @@ input[type="text"]::placeholder { color: var(--text-muted); }
   #game-main { padding: 1.25rem 1rem; }
   .answers-grid { grid-template-columns: 1fr; }
   .stats-grid { grid-template-columns: 1fr; }
+}
+
+/* ---- Guesser chips on reveal ---- */
+.guesser-chip {
+  display: inline-block;
+  padding: 0.18rem 0.55rem;
+  border-radius: 20px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  margin: 0.15rem 0.2rem 0.15rem 0;
+}
+.guesser-chip.correct {
+  background: rgba(82, 214, 138, 0.15);
+  border: 1px solid rgba(82, 214, 138, 0.4);
+  color: var(--success);
+}
+.guesser-chip.wrong {
+  background: rgba(240, 106, 106, 0.12);
+  border: 1px solid rgba(240, 106, 106, 0.35);
+  color: var(--accent3);
+}
+
+/* ---- Personal result banner ---- */
+.result-banner {
+  border-radius: var(--radius);
+  padding: 0.75rem 1.1rem;
+  font-size: 0.9rem;
+  font-weight: 700;
+  margin-bottom: 1.25rem;
+  animation: pulse-in 0.4s ease;
+}
+.result-correct {
+  background: rgba(82, 214, 138, 0.1);
+  border: 1px solid rgba(82, 214, 138, 0.35);
+  color: var(--success);
+}
+.result-wrong {
+  background: rgba(240, 106, 106, 0.1);
+  border: 1px solid rgba(240, 106, 106, 0.3);
+  color: var(--accent3);
+}
+.result-author {
+  background: rgba(232, 197, 71, 0.08);
+  border: 1px solid rgba(232, 197, 71, 0.25);
+  color: var(--accent);
 }

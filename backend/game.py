@@ -98,7 +98,7 @@ async def build_guessing_state(db: AsyncSession, session: Session, viewer_id: st
     guesses = await get_guesses_for_answer(db, current_answer_id)
     guessed_by = {g.guesser_id for g in guesses}
 
-    # Eligible guessers = active players who are NOT the author (+ non-player host excluded)
+    # Eligible guessers = active players who are NOT the author
     eligible_guessers = [
         p for p in players
         if p.id != current_answer.player_id
@@ -116,6 +116,7 @@ async def build_guessing_state(db: AsyncSession, session: Session, viewer_id: st
         "answer_index": idx,
         "total_answers": len(answer_order),
         "current_answer": {"id": current_answer.id, "text": current_answer.text},
+        # All players shown as guess targets — author included — so absence isn't a tell
         "players": [{"id": p.id, "name": p.name} for p in players],
         "eligible_guessers": [p.id for p in eligible_guessers],
         "guessed_so_far": list(guessed_by),
@@ -134,14 +135,13 @@ async def build_guessed_state(db: AsyncSession, session: Session, answer_id: str
     current_answer = answer_map.get(answer_id)
     guesses = await get_guesses_for_answer(db, answer_id)
 
-    # Build distribution: guessed_player_id → list of guesser names
+    # Build distribution: guessed_player_id → vote count only (no guesser names — would leak author identity)
     distribution = {}
     for g in guesses:
         gp = player_map.get(g.guessed_player_id)
-        gs = player_map.get(g.guesser_id)
-        if gp and gs:
-            distribution.setdefault(g.guessed_player_id, {"name": gp.name, "guessers": []})
-            distribution[g.guessed_player_id]["guessers"].append(gs.name)
+        if gp:
+            distribution.setdefault(g.guessed_player_id, {"name": gp.name, "count": 0})
+            distribution[g.guessed_player_id]["count"] += 1
 
     idx = session.current_answer_index
     return {
@@ -159,19 +159,48 @@ async def build_guessed_state(db: AsyncSession, session: Session, answer_id: str
 
 
 async def build_revealed_state(db: AsyncSession, session: Session, answer_id: str, answer_order: list[str]) -> dict:
-    """True author revealed."""
-    state = await build_guessed_state(db, session, answer_id, answer_order)
+    """True author revealed — now safe to show full guesser breakdown."""
     players = await get_active_players(db, session.id)
     answers = await get_answers(db, session.id)
     answer_map = {a.id: a for a in answers}
     player_map = {p.id: p for p in players}
 
     current_answer = answer_map.get(answer_id)
+    guesses = await get_guesses_for_answer(db, answer_id)
     author = player_map.get(current_answer.player_id)
 
-    state["state"] = "revealed"
-    state["true_author"] = {"id": author.id, "name": author.name} if author else None
-    return state
+    # Full distribution with guesser names + correct flag — author is now revealed so no deduction risk
+    distribution = {}
+    for g in guesses:
+        gp = player_map.get(g.guessed_player_id)
+        gr = player_map.get(g.guesser_id)
+        if gp and gr:
+            distribution.setdefault(g.guessed_player_id, {"name": gp.name, "count": 0, "guessers": []})
+            distribution[g.guessed_player_id]["count"] += 1
+            distribution[g.guessed_player_id]["guessers"].append({
+                "name": gr.name,
+                "id": gr.id,
+                "correct": g.is_correct,
+            })
+
+    # Flat lookup: guesser_id → is_correct, so the frontend can personalise the viewer's own result
+    guesser_results = {g.guesser_id: g.is_correct for g in guesses}
+
+    idx = session.current_answer_index
+    return {
+        "type": "state",
+        "state": "revealed",
+        "session_id": session.id,
+        "question": session.question,
+        "host_id": session.host_id,
+        "answer_index": idx,
+        "total_answers": len(answer_order),
+        "current_answer": {"id": current_answer.id, "text": current_answer.text},
+        "players": [{"id": p.id, "name": p.name} for p in players],
+        "guess_distribution": list(distribution.values()),
+        "true_author": {"id": author.id, "name": author.name} if author else None,
+        "guesser_results": guesser_results,
+    }
 
 
 async def build_stats_state(db: AsyncSession, session: Session) -> dict:
