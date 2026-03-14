@@ -2,26 +2,38 @@ import asyncio
 import json
 import os
 import random
+import time
 from contextlib import asynccontextmanager
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy import select
+from sqlalchemy.pool import StaticPool
 
 from models import Base, Session, Player, Answer, Guess, new_id
 from game import (
-    get_session, get_active_players, get_answers,
+    get_session, get_all_players, get_active_players, get_answers,
     build_lobby_state, build_answering_state, build_reveal_state,
     build_guessing_state, build_guessed_state, build_revealed_state, build_stats_state,
+    unique_name,
 )
 from questions import QUESTION_BANK
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./icebreaker.db")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "*")
 
-engine = create_async_engine(DATABASE_URL, echo=False)
+_db_url = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+if ":memory:" in _db_url:
+    engine = create_async_engine(
+        _db_url, echo=False,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+else:
+    engine = create_async_engine(_db_url, echo=False)
+
+DATABASE_URL = _db_url
 async_session = async_sessionmaker(engine, expire_on_commit=False)
 
 
@@ -42,7 +54,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Connection Manager ---
+# ---------------------------------------------------------------------------
+# Connection Manager
+# ---------------------------------------------------------------------------
 
 class ConnectionManager:
     def __init__(self):
@@ -50,6 +64,8 @@ class ConnectionManager:
         self.connections: Dict[str, Dict[str, WebSocket]] = {}
         # session_id → shuffled answer order (list of answer IDs)
         self.answer_order: Dict[str, List[str]] = {}
+        # session_id → asyncio.Task for the running guess timer
+        self.timer_tasks: Dict[str, asyncio.Task] = {}
 
     def connect(self, session_id: str, player_id: str, ws: WebSocket):
         self.connections.setdefault(session_id, {})[player_id] = ws
@@ -76,11 +92,31 @@ class ConnectionManager:
                 pass
 
     async def broadcast_state(self, db: AsyncSession, session_id: str, session: Session):
-        """Send personalised state to each connected player."""
         order = self.answer_order.get(session_id, [])
         for pid in list(self.connections.get(session_id, {}).keys()):
             state = await build_state_for(db, session, pid, order)
             await self.send_to(session_id, pid, state)
+
+    def cancel_timer(self, session_id: str):
+        task = self.timer_tasks.pop(session_id, None)
+        if task and not task.done():
+            task.cancel()
+
+    def start_timer(self, session_id: str, seconds: int):
+        self.cancel_timer(session_id)
+        if seconds > 0:
+            task = asyncio.create_task(self._run_timer(session_id, seconds))
+            self.timer_tasks[session_id] = task
+
+    async def _run_timer(self, session_id: str, seconds: int):
+        """After `seconds`, auto-advance guessing → guessed."""
+        await asyncio.sleep(seconds)
+        async with async_session() as db:
+            session = await get_session(db, session_id)
+            if session and session.state == "guessing":
+                session.state = "guessed"
+                await db.commit()
+                await self.broadcast_state(db, session_id, session)
 
 
 manager = ConnectionManager()
@@ -108,7 +144,9 @@ async def build_state_for(db: AsyncSession, session: Session, viewer_id: str, or
     return {"type": "error", "message": "Unknown state"}
 
 
-# --- REST Endpoints ---
+# ---------------------------------------------------------------------------
+# REST Endpoints
+# ---------------------------------------------------------------------------
 
 @app.get("/questions/random")
 async def random_question():
@@ -120,6 +158,8 @@ async def create_session(body: dict):
     question = body.get("question", random.choice(QUESTION_BANK))
     host_name = body.get("host_name", "Host")
     host_is_player = body.get("host_is_player", True)
+    guess_timer_seconds = int(body.get("guess_timer_seconds", 30))
+    exclude_revealed = body.get("exclude_revealed_from_guessing", False)
 
     async with async_session() as db:
         session_id = new_id()
@@ -131,28 +171,19 @@ async def create_session(body: dict):
             host_id=host_id,
             host_is_player=host_is_player,
             state="lobby",
+            guess_timer_seconds=guess_timer_seconds,
+            exclude_revealed_from_guessing=exclude_revealed,
         )
         db.add(session)
 
-        if host_is_player:
-            host_player = Player(
-                id=host_id,
-                session_id=session_id,
-                name=host_name,
-                is_host=True,
-            )
-            db.add(host_player)
-        else:
-            # Host still gets an ID but is not in player list
-            host_player = Player(
-                id=host_id,
-                session_id=session_id,
-                name=host_name,
-                is_host=True,
-                is_active=False,
-            )
-            db.add(host_player)
-
+        host_player = Player(
+            id=host_id,
+            session_id=session_id,
+            name=host_name,
+            is_host=True,
+            is_active=host_is_player,  # inactive if host-only
+        )
+        db.add(host_player)
         await db.commit()
 
     return {"session_id": session_id, "player_id": host_id, "is_host": True}
@@ -160,23 +191,68 @@ async def create_session(body: dict):
 
 @app.post("/sessions/{session_id}/join")
 async def join_session(session_id: str, body: dict):
-    name = body.get("name", "Player")
+    desired_name = body.get("name", "Player").strip()
     async with async_session() as db:
         session = await get_session(db, session_id)
         if not session:
             raise HTTPException(404, "Session not found")
-        if session.state != "lobby":
-            raise HTTPException(400, "Session already started")
+        # Allow joining in lobby OR in-progress (for reconnects without a stored player_id)
+        if session.state not in ("lobby", "answering", "reveal", "guessing", "guessed", "revealed"):
+            raise HTTPException(400, "Session has ended")
+
+        all_players = await get_all_players(db, session_id)
+        existing_names = [p.name for p in all_players]
+        name = unique_name(desired_name, existing_names)
 
         player_id = new_id()
         player = Player(id=player_id, session_id=session_id, name=name, is_host=False)
         db.add(player)
         await db.commit()
 
-    return {"session_id": session_id, "player_id": player_id, "is_host": False}
+    return {"session_id": session_id, "player_id": player_id, "is_host": False, "name": name}
 
 
-# --- WebSocket ---
+@app.get("/sessions/{session_id}/inactive_players")
+async def get_inactive_players(session_id: str):
+    """Return disconnected players for the rejoin prompt."""
+    async with async_session() as db:
+        session = await get_session(db, session_id)
+        if not session:
+            raise HTTPException(404, "Session not found")
+        all_players = await get_all_players(db, session_id)
+        inactive = [
+            {"id": p.id, "name": p.name, "is_host": p.is_host}
+            for p in all_players
+            if not p.is_active
+        ]
+    return {"inactive_players": inactive}
+
+
+@app.post("/sessions/{session_id}/rejoin/{player_id}")
+async def rejoin_session(session_id: str, player_id: str):
+    """Confirm a rejoin — just validates the player exists in this session."""
+    async with async_session() as db:
+        session = await get_session(db, session_id)
+        if not session:
+            raise HTTPException(404, "Session not found")
+        result = await db.execute(
+            select(Player).where(Player.id == player_id, Player.session_id == session_id)
+        )
+        player = result.scalar_one_or_none()
+        if not player:
+            raise HTTPException(404, "Player not found in this session")
+        is_host = session.host_id == player_id
+    return {
+        "session_id": session_id,
+        "player_id": player_id,
+        "is_host": is_host,
+        "name": player.name,
+    }
+
+
+# ---------------------------------------------------------------------------
+# WebSocket
+# ---------------------------------------------------------------------------
 
 @app.websocket("/ws/{session_id}/{player_id}")
 async def websocket_endpoint(websocket: WebSocket, session_id: str, player_id: str):
@@ -190,22 +266,34 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, player_id: s
             await websocket.close()
             return
 
-        # Mark player active
         result = await db.execute(select(Player).where(Player.id == player_id))
         player = result.scalar_one_or_none()
-        if player and not player.is_active and player.is_host and not session.host_is_player:
-            pass  # host-only, don't activate
-        elif player:
+        if not player:
+            await websocket.send_json({"type": "error", "message": "Player not found — the session may have restarted. Please rejoin via the link."})
+            await websocket.close()
+            manager.disconnect(session_id, player_id)
+            return
+
+        # Reactivate on connect (handles rejoin)
+        is_host_only = player.is_host and not session.host_is_player
+        if not is_host_only:
             player.is_active = True
             await db.commit()
 
         order = manager.answer_order.get(session_id, [])
-        state = await build_state_for(db, session, player_id, order)
-        await websocket.send_json(state)
+        initial_state = await build_state_for(db, session, player_id, order)
+        await websocket.send_json(initial_state)
 
-        # Notify others of new connection
-        await manager.broadcast(session_id, {"type": "player_joined", "player_id": player_id}, exclude=player_id)
-        # Resend full state to everyone
+        # If reconnecting into an active guessing round, send timer_start BEFORE
+        # broadcast_state so the client has timerEndsAt set before it renders
+        if session.state == "guessing" and session.guess_timer_seconds > 0:
+            task = manager.timer_tasks.get(session_id)
+            if task and not task.done():
+                await websocket.send_json({
+                    "type": "timer_start",
+                    "seconds": session.guess_timer_seconds,
+                })
+
         await manager.broadcast_state(db, session_id, session)
 
     try:
@@ -226,6 +314,10 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, player_id: s
                 await manager.broadcast_state(db, session_id, session)
 
 
+# ---------------------------------------------------------------------------
+# Message Handler
+# ---------------------------------------------------------------------------
+
 async def handle_message(session_id: str, player_id: str, msg: dict):
     action = msg.get("action")
 
@@ -236,21 +328,22 @@ async def handle_message(session_id: str, player_id: str, msg: dict):
 
         is_host = session.host_id == player_id
 
-        # --- Submit answer ---
+        # --- Submit or update answer ---
         if action == "submit_answer" and session.state == "answering":
             text = msg.get("text", "").strip()
             if not text:
                 return
-            # Check not already submitted
-            existing = await db.execute(
+            result = await db.execute(
                 select(Answer).where(Answer.session_id == session_id, Answer.player_id == player_id)
             )
-            if existing.scalar_one_or_none():
-                return
-            db.add(Answer(session_id=session_id, player_id=player_id, text=text))
+            existing = result.scalar_one_or_none()
+            if existing:
+                # Update existing answer (change answer feature)
+                existing.text = text
+            else:
+                db.add(Answer(session_id=session_id, player_id=player_id, text=text))
             await db.commit()
 
-            # Check if all active players have submitted
             players = await get_active_players(db, session_id)
             answering_players = [p for p in players if not (p.is_host and not session.host_is_player)]
             answers = await get_answers(db, session_id)
@@ -258,7 +351,6 @@ async def handle_message(session_id: str, player_id: str, msg: dict):
             all_submitted = all(p.id in submitted_ids for p in answering_players)
 
             await manager.broadcast_state(db, session_id, session)
-
             if all_submitted:
                 await manager.broadcast(session_id, {"type": "all_submitted"})
 
@@ -283,6 +375,13 @@ async def handle_message(session_id: str, player_id: str, msg: dict):
             session.state = "guessing"
             session.current_answer_index = 0
             await db.commit()
+            # Start timer BEFORE broadcast_state so clients have timerEndsAt set before rendering
+            if session.guess_timer_seconds > 0:
+                manager.start_timer(session_id, session.guess_timer_seconds)
+                await manager.broadcast(session_id, {
+                    "type": "timer_start",
+                    "seconds": session.guess_timer_seconds,
+                })
             await manager.broadcast_state(db, session_id, session)
 
         # --- Submit guess ---
@@ -292,13 +391,12 @@ async def handle_message(session_id: str, player_id: str, msg: dict):
                 return
             answer_id = order[session.current_answer_index]
 
-            # Validate: not guessing on own answer
             result = await db.execute(select(Answer).where(Answer.id == answer_id))
             answer = result.scalar_one_or_none()
             if not answer or answer.player_id == player_id:
                 return
 
-            # Check not already guessed
+            # Prevent duplicate guess
             existing = await db.execute(
                 select(Guess).where(Guess.answer_id == answer_id, Guess.guesser_id == player_id)
             )
@@ -317,22 +415,23 @@ async def handle_message(session_id: str, player_id: str, msg: dict):
             ))
             await db.commit()
 
-            # Check if all eligible guessers have guessed
             players = await get_active_players(db, session_id)
             eligible = [p for p in players if p.id != answer.player_id]
-            guesses = await db.execute(select(Guess).where(Guess.answer_id == answer_id))
-            guessed_ids = {g.guesser_id for g in guesses.scalars().all()}
+            guesses_result = await db.execute(select(Guess).where(Guess.answer_id == answer_id))
+            guessed_ids = {g.guesser_id for g in guesses_result.scalars().all()}
             all_guessed = all(p.id in guessed_ids for p in eligible)
 
             await manager.broadcast_state(db, session_id, session)
 
             if all_guessed:
+                manager.cancel_timer(session_id)
                 session.state = "guessed"
                 await db.commit()
                 await manager.broadcast_state(db, session_id, session)
 
         # --- Host: force advance guessing ---
         elif action == "force_advance_guessing" and is_host and session.state == "guessing":
+            manager.cancel_timer(session_id)
             session.state = "guessed"
             await db.commit()
             await manager.broadcast_state(db, session_id, session)
@@ -349,10 +448,18 @@ async def handle_message(session_id: str, player_id: str, msg: dict):
             next_idx = session.current_answer_index + 1
             if next_idx >= len(order):
                 session.state = "stats"
+                manager.cancel_timer(session_id)
             else:
                 session.current_answer_index = next_idx
                 session.state = "guessing"
             await db.commit()
+            # Start timer BEFORE broadcast_state for next answer
+            if session.state == "guessing" and session.guess_timer_seconds > 0:
+                manager.start_timer(session_id, session.guess_timer_seconds)
+                await manager.broadcast(session_id, {
+                    "type": "timer_start",
+                    "seconds": session.guess_timer_seconds,
+                })
             await manager.broadcast_state(db, session_id, session)
 
         # --- Host: update question (lobby only) ---
@@ -362,6 +469,15 @@ async def handle_message(session_id: str, player_id: str, msg: dict):
                 session.question = q
                 await db.commit()
                 await manager.broadcast_state(db, session_id, session)
+
+        # --- Host: update settings (lobby only) ---
+        elif action == "update_settings" and is_host and session.state == "lobby":
+            if "guess_timer_seconds" in msg:
+                session.guess_timer_seconds = max(0, int(msg["guess_timer_seconds"]))
+            if "exclude_revealed_from_guessing" in msg:
+                session.exclude_revealed_from_guessing = bool(msg["exclude_revealed_from_guessing"])
+            await db.commit()
+            await manager.broadcast_state(db, session_id, session)
 
 
 if __name__ == "__main__":

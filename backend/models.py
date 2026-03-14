@@ -20,9 +20,15 @@ class Session(Base):
     host_id = Column(String, nullable=False)
     host_is_player = Column(Boolean, default=True)
     state = Column(String, default="lobby")
-    # States: lobby → answering → reveal → guessing → guessed → done
+    # States: lobby → answering → reveal → guessing → guessed → revealed → stats
     current_answer_index = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Guessing timer in seconds (0 = no timer, host advances manually)
+    guess_timer_seconds = Column(Integer, default=30)
+
+    # If True, players whose answers have already been revealed cannot be voted on
+    exclude_revealed_from_guessing = Column(Boolean, default=False)
 
     players = relationship("Player", back_populates="session", cascade="all, delete-orphan")
     answers = relationship("Answer", back_populates="session", cascade="all, delete-orphan")
