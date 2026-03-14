@@ -43,6 +43,17 @@
               </label>
             </div>
 
+            <label>Guess timer <span class="hint">(seconds per answer, 0 = no timer)</span></label>
+            <input id="create-timer" type="number" min="0" max="300" value="30" style="width:100%" />
+
+            <div class="toggle-row">
+              <label class="toggle-label">Exclude revealed players from future votes</label>
+              <label class="switch">
+                <input id="create-exclude-revealed" type="checkbox" />
+                <span class="slider"></span>
+              </label>
+            </div>
+
             <button id="btn-create" class="btn-primary">Create session</button>
           </div>
 
